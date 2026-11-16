@@ -4,14 +4,15 @@ from __future__ import annotations
 from . import *
 from .utils import debugger
 from .menu import NotificationPriority
-from requests import post, exceptions
+import base64
+from requests import get, post, exceptions
 from threading import Thread
 from time import sleep
 from json import loads
-from re import sub
+from re import sub, search, findall
 
 #------------------------ CONSTANTS --------------------------#
-MAX_CAPTCHA_REGENS = 3
+MAX_CAPTCHA_REGENS = 5
 
 #------------------------- CLASSES ---------------------------#
 class UnkownCaptchaError(Exception):
@@ -56,8 +57,8 @@ class Captcha:
     language: str = field(default='eng', repr=False)
     
     def __post_init__(self) -> None:
-        self._word_list = ['captcha', 'verify']
-        self._engines = [2, 1, 3, 5]
+        self._word_list = ['captcha', 'verify', 'anti-bot']
+        self._engines = [2, 1]
     
     @property
     def name(self) -> str:
@@ -65,38 +66,68 @@ class Captcha:
         return f'{self.__class__.__name__}'
     
     def filter(self, value: str) -> str:
-        '''Filters results form the API. Valid results -> only alphanum and len == 6'''
+        '''Filters results from the API. Valid results -> alphanum between 4 and 8 chars'''
         if value:
+            lines = [l.strip() for l in value.split('\n') if l.strip()]
+            for line in reversed(lines):
+                ans = sub('[^a-zA-Z0-9]', '', line)
+                if 4 <= len(ans) <= 8 and ans.lower() not in ['verify', 'result', 'answer', 'code', 'regen']:
+                    return ans
             ans = sub('[^a-zA-Z0-9]', '', value)
-            if len(ans) == self._captcha_length:
+            if 4 <= len(ans) <= 8 and ans.lower() not in ['verify', 'result', 'answer', 'code', 'regen']:
                 return ans
-            else: 
-                #Invalid result
-                return None
-        else:
             return None
+        return None
     
+    def generate_candidates(self, ans: str) -> list[str]:
+        '''Generates candidate variations for easily-confused OCR characters.'''
+        candidates = [ans]
+        swaps = [
+            ('g', 'q'), ('q', 'g'),
+            ('l', '1'), ('1', 'l'),
+            ('0', 'O'), ('O', '0'),
+            ('5', 'S'), ('S', '5'),
+            ('2', 'Z'), ('Z', '2')
+        ]
+        for old, new in swaps:
+            if old in ans:
+                variant = ans.replace(old, new)
+                if variant not in candidates:
+                    candidates.append(variant)
+        return candidates
+
     def request(self, engine: int) -> None:
-        #Todo: make this function less complex and better structured
         '''Makes a request to the OCR api and appends the result (if valid) to the answers list.'''
-        if not self.detected: 
+        if not self.detected or not self.captcha_image: 
             return None
+
+        # Download image and convert to base64 to avoid Discord CDN blocking/expiring URL issues
+        b64_image = None
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            img_r = get(self.captcha_image, headers=headers, timeout=6)
+            if img_r.status_code == 200:
+                b64_image = 'data:image/png;base64,' + base64.b64encode(img_r.content).decode()
+        except Exception as e:
+            debugger.log(e, f'{self.name} - download image')
 
         payload = {
             'apikey': self.api_key,
-            'url': self.captcha_image,
             'isOverlayRequired': self.is_overlay_required,
             'detectOrientation': self.detect_orientation,
-            'scale': self.scale,
+            'scale': True,
             'OCREngine': engine,
             'language': self.language
         }
+        if b64_image:
+            payload['base64Image'] = b64_image
+        else:
+            payload['url'] = self.captcha_image
         
         try:
-            request = post(self._ocr_url, data=payload, timeout=self._max_timeout)
-            response = loads(request.content.decode())
+            req = post(self._ocr_url, data=payload, timeout=self._max_timeout)
+            response = loads(req.content.decode())
         except exceptions.ReadTimeout as e:
-            #Took too long to respond
             self.menu.notify(f'[!] Engine {engine} took too long to respond.', NotificationPriority.LOW)
             if engine == self._engines[-1]:
                 self.solving = False
@@ -104,31 +135,29 @@ class Captcha:
             return None
         except Exception as e:
             debugger.log(e, f'{self.name} - request')
-            raise UnkownCaptchaError(e)
+            if engine == self._engines[-1]:
+                self.solving = False
+            return None
         
-        if response['OCRExitCode'] == 1:
-            if self.detected:
-                answer = self.filter(response['ParsedResults'][0]['ParsedText'])
+        if response.get('OCRExitCode') == 1:
+            if self.detected and response.get('ParsedResults'):
+                parsed_text = response['ParsedResults'][0].get('ParsedText', '')
+                answer = self.filter(parsed_text)
                 if answer:
-                    #To avoid conflicts due to multi-threading, it must not be duplicate, 
-                    #it must not be solved and must be busy (to garatee that the object it's the same)
-                    if answer not in self.answers and self.detected:
-                        self.answers.append(answer)
-                    else:
-                        #Duplicate result
-                        pass
+                    candidates = self.generate_candidates(answer)
+                    for cand in reversed(candidates):
+                        if cand not in self.answers and self.detected:
+                            self.answers.append(cand)
+                    self.menu.notify(f'[*] OCR decoded: "{answer}" (candidates: {candidates})')
             
             if engine == self._engines[-1]:
-                if not self.detected: 
-                    return None
                 self.solving = False
             return None
         else:
-            #API error
             if not self.detected: 
                 return None
             self.menu.notify(
-                f'[!] Engine {engine} OCR API error -> ExitCode: {response["OCRExitCode"]}.', 
+                f'[!] Engine {engine} OCR API error -> ExitCode: {response.get("OCRExitCode")}.', 
                 NotificationPriority.HIGH
             )
             if engine == self._engines[-1]:
@@ -140,35 +169,119 @@ class Captcha:
         self.busy = True
 
         for target in self._word_list:
-            if str(event).find(target) > -1:
+            if str(event).lower().find(target) > -1:
                 self.detected = True
                 break
         
         if self.detected:
-            embeds = event['embeds']
-            if len(embeds) > 0:
+            # 1. Collect all text from content, embeds, and components
+            content = event.get('content', '') or ''
+            embed_texts = []
+            embeds = event.get('embeds', [])
+            if isinstance(embeds, list):
                 for embed in embeds:
-                    try:
-                        self.captcha_image = embed['image']['url']
-                        if self.captcha_image:
-                            self.busy = False
-                            return True
-                        else:
-                            #No image but field not keyerror
-                            #raise UnknownCaptchaError('Image embeded but no image on key: embed["image"]["url"]')
-                            debugger.log('UnknownCaptchaError: No image but field not keyerror', f'{self.name} - detect')
-                            return True
-                    except KeyError:
-                        #Manual input needed - no image embeded
-                        #raise UnknownCaptchaError('No image embeded')
-                        #Their bot is bugged: https://discord.com/channels/565375575930437632/1022248238285336626/threads/1042106536232759446
-                        #It should raise an exception but for now, just regen
-                        debugger.log('UnknownCaptchaError: No image embeded', f'{self.name} - detect')
+                    if isinstance(embed, dict):
+                        if embed.get('title'):
+                            embed_texts.append(str(embed.get('title')))
+                        if embed.get('description'):
+                            embed_texts.append(str(embed.get('description')))
+                        for f in embed.get('fields', []):
+                            if isinstance(f, dict):
+                                embed_texts.append(str(f.get('name', '')))
+                                embed_texts.append(str(f.get('value', '')))
+
+            # Extract text from nested components (Discord Components V2)
+            comp_texts = []
+            def recurse_comp_texts(items):
+                if not items or not isinstance(items, list): return
+                for it in items:
+                    if isinstance(it, dict):
+                        if it.get('content'): comp_texts.append(str(it['content']))
+                        if it.get('components'): recurse_comp_texts(it['components'])
+            recurse_comp_texts(event.get('components', []))
+
+            all_text = f"{content}\n" + "\n".join(embed_texts + comp_texts)
+
+            # 2. Check for plain text captcha code (cleaning markdown characters like *, `, _, ~)
+            clean_text = sub(r'[*_`~#]', '', all_text)
+            code_match = search(r'Code:\s*([a-zA-Z0-9]{3,8})', clean_text)
+            if not code_match:
+                code_match = search(r'Please use /verify\s+([a-zA-Z0-9]{3,8})', clean_text)
+            if code_match:
+                code = code_match.group(1).strip()
+                if code.lower() not in ['result', 'answer', 'code', 'regen', 'with', 'this']:
+                    self.answers = [code]
+                    self.captcha_image = None
+                    self.busy = False
+                    debugger.log(f'Text captcha detected with code: {code}', f'{self.name} - detect')
+                    return True
+
+            # 3. Check for image inside Components V2 (type: 12 Media Gallery)
+            def recurse_comp_media(items):
+                if not items or not isinstance(items, list): return None
+                for it in items:
+                    if isinstance(it, dict):
+                        if 'media' in it and isinstance(it['media'], dict) and it['media'].get('url'):
+                            return it['media']['url']
+                        if 'items' in it and isinstance(it['items'], list):
+                            res = recurse_comp_media(it['items'])
+                            if res: return res
+                        if 'components' in it and isinstance(it['components'], list):
+                            res = recurse_comp_media(it['components'])
+                            if res: return res
+                return None
+
+            comp_img = recurse_comp_media(event.get('components', []))
+            if comp_img:
+                self.captcha_image = comp_img
+                self.busy = False
+                debugger.log(f'Captcha image found in Components V2: {self.captcha_image}', f'{self.name} - detect')
+                return True
+
+            # 4. Check for image in attachments
+            for attachment in event.get('attachments', []):
+                if isinstance(attachment, dict):
+                    if attachment.get('url'):
+                        self.captcha_image = attachment['url']
+                        self.busy = False
                         return True
-            else:
-                #Captcha detected but no embed.
-                debugger.log('UnknownCaptchaError: Captcha detected but no embed', f'{self.name} - detect')
-                raise UnkownCaptchaError('Captcha detected but no embed')
+                    if attachment.get('proxy_url'):
+                        self.captcha_image = attachment['proxy_url']
+                        self.busy = False
+                        return True
+
+            # 5. Check for image in embeds
+            for embed in embeds:
+                if isinstance(embed, dict):
+                    for img_key in ['image', 'thumbnail']:
+                        if img_key in embed and isinstance(embed[img_key], dict):
+                            img_obj = embed[img_key]
+                            if img_obj.get('url'):
+                                self.captcha_image = img_obj['url']
+                                self.busy = False
+                                return True
+                            if img_obj.get('proxy_url'):
+                                self.captcha_image = img_obj['proxy_url']
+                                self.busy = False
+                                return True
+
+            # 6. Regex search across the entire raw event string for any Discord CDN image
+            event_str = str(event)
+            found_urls = findall(r'https?://(?:cdn|media)\.discordapp\.(?:com|net)/attachments/[^\s"\'<>]+\.(?:png|jpg|jpeg|webp|gif)[^\s"\'<>]*', event_str)
+            if not found_urls:
+                found_urls = findall(r'https?://[^\s"\'<>]+\.(?:png|jpg|jpeg|webp|gif)[^\s"\'<>]*', event_str)
+            if found_urls:
+                filtered = [u for u in found_urls if 'emojis' not in u and 'avatars' not in u]
+                if filtered:
+                    self.captcha_image = filtered[0]
+                    self.busy = False
+                    debugger.log(f'Captcha image URL found via regex: {self.captcha_image}', f'{self.name} - detect')
+                    return True
+
+            # Captcha detected but no image or explicit text code found
+            debugger.log(f'Captcha detected but no image or explicit text code: {all_text}', f'{self.name} - detect')
+            self.busy = False
+            return True
         else:
             self.busy = False
             self.reset()
@@ -176,10 +289,21 @@ class Captcha:
 
     def solve(self) -> None:
         '''Start engine threads to solve the captcha.'''
-        #Todo: try asyncio instead of threads
         self.busy = True
-        self.solving = True
         self.regenerating = False
+        
+        # If code was already extracted from text, skip OCR
+        if len(self.answers) > 0:
+            self.solving = False
+            self.busy = False
+            return None
+        
+        if not self.captcha_image:
+            self.solving = False
+            self.busy = False
+            return None
+
+        self.solving = True
         self.answers = [] #Reset answers for redundancy
         
         for engine in self._engines:
@@ -195,7 +319,9 @@ class Captcha:
         self.answers = []
         self.busy = False
         self.detected = False
+        self.solving = False
         self.regenerating = False
+        self.captcha_image = None
         self.regens = 0
         return None
         

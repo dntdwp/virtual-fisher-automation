@@ -319,6 +319,13 @@ class DiscordWrapper:
                     return None
             
             if cmd_data:
+                # Dynamically adapt option parameter name if needed
+                if isinstance(parameters, dict) and 'options' in cmd_data and len(cmd_data['options']) > 0:
+                    cmd_options = cmd_data['options']
+                    opt_names = [opt.get('name') for opt in cmd_options if isinstance(opt, dict) and 'name' in opt]
+                    if opt_names and parameters.get('name') not in opt_names:
+                        parameters['name'] = opt_names[0]
+
                 return {
                     'type': 2,
                     'application_id': APPLICATION_ID,
@@ -414,7 +421,8 @@ class DiscordWrapper:
                     if int(response['code']) == INVALID_FORM_BODY:
                         #Non critical, but send slash command instead
                         #debug - ax0
-                        print(err_message, '\nax0')
+                        if category != BUTTON:
+                            print(err_message, '\nax0')
                         debugger.log(err_message, 'ax0')
                         return False
                     else:
@@ -426,21 +434,21 @@ class DiscordWrapper:
                 elif status_code == 429:
                     response = loads(request.content)
                     try:
-                        if not response['global']:
+                        if not response.get('global', False):
                             #Local resource limitation (but successfull)
-                            message = response['message']
+                            message = response.get('message', 'Rate limited')
 
-                            waiting_time = self._rate_limit_safe_guard + float(response['retry_after'])
+                            waiting_time = self._rate_limit_safe_guard + float(response.get('retry_after', 1))
                             self.menu.notify(f'[429] {message.capitalize()} waiting {waiting_time} seconds.', NotificationPriority.HIGH)
                             sleep(waiting_time)
                             return True
                         else:
                             #Global resource limitation (rare)
-                            message = response['message']
-                            exit('[E] 429 (Global): ', message, data)
+                            message = response.get('message', 'Global rate limit')
+                            exit(f'[E] 429 (Global): {message} {data}')
                     except (KeyError, TypeError, ValueError) as e:
                         debugger.log(e, f'{self.name} 429')
-                        exit('[E] 429: ', e)
+                        exit(f'[E] 429: {e}')
                 else:
                     #Gateway unavailable
                     self.menu.notify(f'[!] Gateway unavailable: {status_code}. Waiting 30 seconds.')

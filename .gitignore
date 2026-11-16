@@ -8,6 +8,14 @@ app/*.json
 *.code-workspace
 assets/images/logo.png
 
+# Sensitive configs & local user data
+*.config
+!assets/template.config
+configs/*.config
+.env
+.env.*
+app/debug.log
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

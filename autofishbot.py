@@ -2,6 +2,7 @@
 #------------------------ IMPORTS --------------------------#
 from __future__ import annotations
 from app import *
+from requests import get
 from websocket import WebSocketConnectionClosedException
 from threading import Thread
 from time import sleep, time
@@ -37,27 +38,46 @@ class Receiver:
     def check_event(self, response: dict) -> bool:
         '''Checks if event is targeted to the user (sent by the application to the selected channel),
         also defines the self.event.'''
-        if not response:
+        if not response or not isinstance(response, dict):
             return False
         
-        try:
-            e = response['d']
-            e_name = response['t']
-            e_channel = e['channel_id']
-            e_author = e['author']['id']
-        except (KeyError, TypeError):
+        e = response.get('d')
+        if not e or not isinstance(e, dict):
             return False
         
+        e_name = response.get('t')
         if e_name in TARGET_EVENT_NAMES:
-            if e_channel == self.config.channel_id:
-                if e_author == APPLICATION_ID:
+            if str(e.get('channel_id')) == str(self.config.channel_id):
+                author = e.get('author')
+                e_author = author.get('id') if isinstance(author, dict) else None
+                if e_author == APPLICATION_ID or e_author is None:
                     self.event = e
                     return True
         return False
 
     
+    def check_initial_captcha(self) -> None:
+        '''Checks recent channel messages on startup in case a captcha is already pending.'''
+        try:
+            url = f'https://discord.com/api/v{self.session.endpoints.version}/channels/{self.config.channel_id}/messages?limit=10'
+            headers = self.session.headers
+            res = get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                msgs = res.json()
+                for m in msgs:
+                    txt = str(m).lower()
+                    if 'solve the captcha posted above' in txt:
+                        continue
+                    if self.captcha.detect(m):
+                        self.menu.notify('[!] Pending captcha detected on startup!', NotificationPriority.HIGH)
+                        self.captcha.solve()
+                        break
+        except Exception as e:
+            debugger.log(e, f'{self.name} - check_initial_captcha')
+
     def run(self) -> None:
         '''Main loop, continuously checks for new gateway events and properly handles it.'''
+        self.check_initial_captcha()
         self.is_ready = True
         while True:
             try:
@@ -83,30 +103,41 @@ class Receiver:
                 #Invalid/Irrelevant gateway event
                 continue
             
-            self.message.make(self.event)
+            try:
+                self.message.make(self.event)
+            except Exception as e:
+                debugger.log(e, f'{self.name} - make message')
+                continue
             
+            msg_text_all = f"{self.message.content or ''} {self.message.description or ''} {self.message.untitled or ''}".lower()
+            if 'banned for' in msg_text_all:
+                self.menu.notify('[E] Account banned detected. Stopping bot!', NotificationPriority.VERY_HIGH)
+                self.menu.kill()
+                exit('\n[E] Account banned by Virtual Fisher. Bot stopped for safety.')
+
             if self.captcha.detected and not self.captcha.regenerating:
-                if self.message.content == 'You may now continue.':
+                msg_text = f"{self.message.content or ''} {self.message.description or ''} {self.message.untitled or ''}"
+                if 'you may now continue' in msg_text.lower():
                     #Captcha bypassed
                     self.menu.rcv_bypasses += 1
                     self.captcha.reset()
                     self.menu.notify('[*] Captcha bypassed !')
+                elif 'incorrect code' in msg_text.lower():
+                    self.menu.notify('[*] Incorrect code.', NotificationPriority.LOW)
+                    continue
+                elif self.captcha.detect(self.event):
+                    self.captcha.solve()
+                    continue
                 else:
-                    if self.message.content.find('Incorrect code') > -1:
-                        self.menu.notify('[*] Incorrect code.', NotificationPriority.LOW)
-                        continue
-                    else:
-                        #Message sent by the bot while captcha is detected
-                        debugger.log(self, f'{self.name} - run (Message sent by the AFB while captcha is detected)')
-                        break
+                    # Message while waiting for captcha verification - continue waiting
+                    continue
             elif self.captcha.regenerating:
                 if self.captcha.detect(self.event):
                     self.captcha.solve()
                     continue
                 else:
-                    #No detection while regenerating
-                    debugger.log(self, f'{self.name} - run (No detection while regenerating)')
-                    exit()
+                    # Waiting for new captcha after regen
+                    continue
             else:
                 if self.captcha.detect(self.event):
                     self.menu.notify('[!] Captcha detected !', NotificationPriority.NORMAL)
@@ -115,7 +146,7 @@ class Receiver:
                 else:
                     if self.message.title:
                         #Normal messages
-                        if self.message.title == self.category.fish:
+                        if self.message.title.startswith('You caught') or self.message.title == self.category.fish:
                             #Fish (/fish or button) messages
                             self.menu.items = self.message.build()
                             self.menu.rcv_streak += 1
@@ -158,15 +189,17 @@ class Receiver:
                                 pass
                             else:
                                 #Untitled message
-                                self.menu.notify(f'[*] {self.message.untitled}')
+                                if self.message.untitled and self.message.untitled.strip():
+                                    self.menu.notify(f'[*] {self.message.untitled}')
                         else:
-                            #Untitled with empty content  - probably embeded only with description
-                            if menu.is_alive:
-                                self.menu.notify(f'[*] {self.message.untitled}')
-                            else:
-                                if self.message.untitled.find('You hired a worker for the next') > -1 \
-                                    or self.message.untitled.find('You already have a worker working') > -1:
-                                    print(f'[*] {self.message.untitled}')
+                            #Untitled with empty content - probably embedded/component only with description
+                            if self.message.untitled and self.message.untitled.strip():
+                                if self.menu.is_alive:
+                                    self.menu.notify(f'[*] {self.message.untitled}')
+                                else:
+                                    if self.message.untitled.find('You hired a worker for the next') > -1 \
+                                        or self.message.untitled.find('You already have a worker working') > -1:
+                                        print(f'[*] {self.message.untitled}')
                             pass
 
         self.is_ready = False
@@ -243,12 +276,18 @@ class Dispatcher:
                 sleep(_delay)
                 continue
             
+            msg_text_all = f"{self.message.content or ''} {self.message.description or ''} {self.message.untitled or ''}".lower()
+            if 'banned for' in msg_text_all:
+                self.menu.notify('[E] Account banned detected. Stopping bot!', NotificationPriority.VERY_HIGH)
+                self.menu.kill()
+                exit('\n[E] Account banned by Virtual Fisher. Bot stopped for safety.')
+
             if self.captcha.detected and not self.captcha.regenerating:
                 if self.captcha.solving or len(self.captcha.answers) > 0:
                     try:
                         answer = self.captcha.answers.pop()
                         self.menu.notify(f'[!] Attempting code: "{answer}".')
-                        cmd, param = self.make_command('verify', 'answer', answer)
+                        cmd, param = self.make_command('verify', 'result', answer)
                         self.session.request(command=cmd, parameters=param, category=COMMAND)
                         
                         sleep(self.timeout)
@@ -263,7 +302,7 @@ class Dispatcher:
                         #detect() method but also keep the captcha.regens counter
                         self.captcha.regenerating = True
                         
-                        cmd, param = self.make_command('verify', 'answer', 'regen')
+                        cmd, param = self.make_command('verify', 'result', 'regen')
                         self.session.request(command=cmd, parameters=param, category=COMMAND)
 
                         #This sleep timeout might be needed in case of really slow 
@@ -271,7 +310,7 @@ class Dispatcher:
                         #?Further testing needed
                         sleep(1)
                     else:
-                        self.menu.notify(f'[!] MAXIMUM CAPTCHA REGENS EXCEEDED, WAITING FOR MANUAL INPUT !', NotificationPriority.VERY_HIGH)
+                        self.menu.notify(f'[!] Maximum captcha regens exceeded ({MAX_CAPTCHA_REGENS}). Please run /verify in Discord!', NotificationPriority.VERY_HIGH)
                         #Max regens attempts exceeded, waits for manual input
                         while self.captcha.detected:
                             sleep(1)

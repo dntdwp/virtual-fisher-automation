@@ -1,227 +1,152 @@
-**Due to time limitations, this project is no longer active/maintained. Feel free to fork it and make improvements.**
+# Virtual Fisher Automation
 
-# AFB - Autofishbot
-Auto fishing bot made in Python 3 for [Virtual Fisher](https://virtualfisher.com/) Discord bot.
+An automated Python Discord client & terminal UI (TUI) bot for the **Virtual Fisher** Discord bot, upgraded for modern **Discord Components V2** payloads, resilient OCR captcha handling, startup state recovery, and concurrency-safe command scheduling.
 
-## Features
-- Auto Fish 
-- Menu (TUI)
-- Captcha Bypass [*](#captcha-information)
-- Full-featured (auto boosts, auto daily, auto sell, and +)
-- Interactions (buttons and slash commands)
+> **Attribution:** Forked and significantly upgraded from [`thejoabo/autofishbot`](https://github.com/thejoabo/autofishbot) under the [MIT License](LICENSE).
+>
+> **Disclaimer:** This project is maintained for educational and automation-engineering portfolio purposes. Automating user accounts (self-botting) may violate Discord's Terms of Service—use responsibly and at your own risk.
 
-**Note**: the **experimental-2.0.0** (current) version is still under development, if you are having problems, a stable release (**1.2.1.1**) can be found [here](assets/stable-legacy/stable-1.2.1.1.zip).
+---
 
-## Demo
-![demo](assets/images/demo.gif)
+## Key Features & Engineering Improvements
+
+### 1. Discord Components V2 Support (`app/message.py`, `app/captcha.py`)
+- Recursive extraction of nested **Discord Components V2** structures (`type: 17` Container, `type: 10` Text Display, `type: 12` Media Gallery, and `type: 1` Action Row / Buttons) alongside legacy embeds.
+- Reliably parses catch logs (`You caught:`), interactive **Fish Again** button IDs, and captcha media URLs even when `content` and `embeds` are empty.
+
+### 2. Resilient Captcha Pipeline (`app/captcha.py`)
+- **CDN-Safe Image Fetching:** Downloads captcha images directly and uploads them as Base64 payloads to the OCR.space API (`OCREngine` `2` and `1`), preventing Discord CDN link blocking or token expiration errors.
+- **OCR Disambiguation:** `generate_candidates()` automatically generates fallback candidates for commonly misread characters (`g` ↔ `q`, `l` ↔ `1`, `0` ↔ `O`, `5` ↔ `S`, `2` ↔ `Z`) so a single character confusion is retried immediately before regenerating.
+- **Multi-Source Extraction:** Supports plain-text codes (stripping Markdown formatting), Components V2 Media Gallery items, attachments, embeds, and regex CDN URL fallbacks, with up to `5` automatic captcha regenerations (`MAX_CAPTCHA_REGENS = 5`).
+
+### 3. Startup Recovery & Concurrency Locks (`autofishbot.py`, `app/scheduler.py`)
+- **Startup Captcha Check (`check_initial_captcha`):** Inspects recent channel messages at startup to detect and resolve any pending captcha *before* starting the fishing loop or scheduler.
+- **Strict Captcha Lock:** Fixed boolean precedence in `Scheduler.check_task()` and added blocking waits so background tasks (`/buy`, `/sell`, `/daily`, `/profile`) never fire while a captcha is active or paused.
+- **Safety Auto-Stop:** Automatically kills threads and exits cleanly if a ban message is detected.
+
+### 4. Discord API & Gateway Resilience (`app/api_wrapper.py`, `autofishbot.py`)
+- **Dynamic Slash Command Mapping:** Automatically adapts slash command option names (e.g., `result` vs `answer`) against Discord's application command schema.
+- **Safe Event & Rate-Limit Handling:** Guards against `None` payloads in Gateway heartbeat ACKs (`check_event`), safely parses HTTP `429` rate-limit responses, and suppresses noisy expired-button `COMPONENT_VALIDATION_FAILED` errors so the dispatcher smoothly falls back to `/fish`.
+
+### 5. Humanized Timing & TUI Dashboard (`app/cooldown.py`, `app/menu.py`)
+- Gaussian-distributed fishing cooldowns, randomized scheduler delays, and periodic break intervals.
+- Interactive `curses`-based TUI (`MainMenu` and `CompactMenu`) with customizable keybinds and optional HTTPS proxy support.
+
+---
+
+## Project Structure
+
+```text
+autofishbot/
+├── autofishbot.py          # Main entry point (Receiver, Dispatcher, initialization)
+├── requirements.txt        # Python dependencies
+├── assets/
+│   └── template.config     # Sample configuration template
+├── configs/                # Local user configs (*.config is git-ignored)
+└── app/
+    ├── api_wrapper.py      # Discord REST API & WebSocket Gateway wrapper
+    ├── captcha.py          # Captcha detector & multi-engine OCR solver
+    ├── config.py           # Config parser, validator, and generator
+    ├── cooldown.py         # Gaussian cooldown calculator
+    ├── menu.py             # Curses TUI dashboard & keybind handler
+    ├── message.py          # Discord Components V2 & embed parser
+    ├── profile.py          # Inventory, charms, buffs, quests, leaderboard models
+    ├── scheduler.py        # Periodic automation queue & break scheduler
+    └── utils.py            # Sanitization helpers and file debugger
+```
+
+---
 
 ## Requirements
-- Python [3.10.6](https://www.python.org/downloads/release/python-3106/) or [later versions](https://www.python.org/downloads/)
-- [Git](https://git-scm.com/downloads) (optional)
 
-## Installation and Update
-(**With** Git) 
-- Using the terminal, type:
+- **Python 3.10+** (uses `match/case` and modern typing)
+- **OCR.space API Key** (free tier available at [ocr.space/ocrapi/freekey](https://ocr.space/ocrapi/freekey))
+
+---
+
+## Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/dntdwp/virtual-fisher-automation.git
+   cd virtual-fisher-automation
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   python -m pip install -r requirements.txt
+   ```
+   > **Linux / macOS note:** Remove or skip the `windows-curses` line in `requirements.txt`, as `curses` is built into Python on Unix-like systems.
+
+---
+
+## Configuration
+
+Your credentials and IDs stay completely local—`configs/*.config`, `.env*`, and `*.log` are excluded in `.gitignore`.
+
+### Option A: Interactive Generator
 ```bash
-git clone https://github.com/thejoabo/autofishbot.git
-cd autofishbot
-python -m pip install -r requirements.txt
+python autofishbot.py --create
 ```
-(**Without** Git)
-- Download the repository [here](https://github.com/thejoabo/autofishbot/archive/refs/heads/main.zip)
-- Extract the zip file
-- Open a terminal window in the extracted folder and type:
-```bash
-python -m pip install -r requirements.txt
-``` 
-## Usage
-Using the terminal, **in the repository folder**, type:
-```bash
-python autofishbot.py 
-```
-**Notes**:
-- You can use ```python autofishbot.py config_name``` to run the bot with a specific config file.
-- You can use ```python autofishbot.py --create``` to create a new config file.
-- In the first startup, the bot will ask you to fill the configuration file name (which will be stored at '```{autofishbot directory}/configs/```' folder). After setting everything up, run the command again. In case of several config files, you will be prompted to choose one.
 
-## Customization
+### Option B: Manual Setup from Template
+1. Copy [`assets/template.config`](assets/template.config) into `configs/mybot.config`.
+2. Fill in the required fields:
 
-You can easily customize the options listed below in the automatically generated [config file](assets/template.config):
-
-```conf
-#Example
+```ini
 [SYSTEM]
-user_token = M@yToke_n123
-user_cooldown = 3.5
-channel_id = 123456
-debug = False
+USER_TOKEN = YOUR_DISCORD_USER_TOKEN
+USER_COOLDOWN = 2.4
+CHANNEL_ID = YOUR_TARGET_CHANNEL_ID
+GUILD_ID = YOUR_TARGET_GUILD_ID
+DEBUG = True
 
 [CAPTCHA]
-ocr_api_key = MyK!ey12.3
-
-[NETWORK]
-user_agent = 
-proxy_ip =
-proxy_port =
-proxy_auth_user = 
-proxy_auth_password = 
-
-[AUTOMATION]
-boosts_length = 5
-more_fish = True
-more_treasures = False
-fish_on_exit = True
-auto_daily = True
-auto_buy_baits = False
-auto_sell = True
-auto_update_inventory = False
-
-[MENU]
-compact_mode = False
-refresh_rate = 0.3
-
-[COSMETIC]
-pet = dolphin
-bait = fish
-biome = ocean
+OCR_API_KEY = YOUR_OCR_SPACE_API_KEY
 ```
-Detailed information [here](assets/faq.md).
 
+- `USER_COOLDOWN`: Valid range is `2.0` to `3.5` seconds (adjust to match your in-game boat/rod cooldown).
+- Optional sections in `template.config` configure HTTPS proxies (`[NETWORK]`), auto boosts/sell/daily/baits (`[AUTOMATION]`), and UI refresh rate/compact mode (`[MENU]`).
 
-## Captcha Information
-All captchas are solved using the OCR.SPACE API for image to text recognition. The reason for choosing an online API was to avoid the annoyance of forcing users to install heavy image recognition modules (and saving the unnecessary effort of creating a specific image recognition model for this type of captcha). Among the API options, the most practical and accessible for the user is OCR.SPACE and, furthermore, it presented a reasonable consistency in correctly identifying the text in the image in the tests performed. **Therefore, to automatically solve the captchas, you will need an [API KEY](#how-do-i-get-my-free-key-)**.
+---
 
-The methodology is quite straight forward, when a new captcha is detected:
+## Usage
 
-1. A request is sent asynchronously to the API for each available OCR engine
-2. The answers are filtered to assert those with reasonable certainty 
-3. The filtered answers are tested
+Run the bot from the repository root:
 
-If all tests fail, a request to regenerate the captcha will be sent (up to 3 times). If the bot, ultimately, fails to solve all captchas, it will wait until you solve it manually.
+```bash
+python autofishbot.py
+```
 
-Keep in mind that the captcha detection method is not flawless, unexpected events can cause some unusual behavior that could influence detection accuracy. Therefore, it should not be left alone without monitoring for longer periods of time.
-### Demo (normal)
-![captcha-demo](assets/images/captcha-demo.gif)
+Or specify a config file directly:
 
-### Demo (with regen)
-![captcha-demo-wrong-code](assets/images/captcha-with-regen.gif)
+```bash
+python autofishbot.py mybot.config
+```
 
-### HOW DO I GET MY **FREE** KEY ?
+### Default Keybinds
 
-All you need to do is use [any](https://temp-mail.io/en) email to get it here: https://ocr.space/ocrapi/freekey.
+| Key | Action |
+| :---: | :--- |
+| `p` | Pause / Resume bot |
+| `Q` | Quit bot safely |
+| `s` | Sell inventory |
+| `I` | Update inventory / profile |
+| `L` | Update leaderboards |
+| `K` | Update cosmetics |
+| `F` | Buy More Fish boost |
+| `T` | Buy More Treasures boost |
+| `D` | Claim daily reward |
+| `Y` | Show quests popup |
+| `o` | Show current inventory popup |
+| `C` | Show charms popup |
+| `B` | Show buffs popup |
+| `e` | Show exotic fishes popup |
 
-[Need more help ?](assets/faq.md#ocr_api_key)
+Keybinds can be customized after first launch in `app/keybinds.json` (also git-ignored).
 
+---
 
-## Changelog
-### experimental-2.0.0 - 11/20/22 (current)
-#### **Added**
-- added **Scheduler** class (#38) - experimental
-  - Allows slash commands to be sent using keybinds
-  - Creates, controls and pseudo-randomizes automation routines (boosts and auto_* features) → attempts to mimic human behavior
-  - Sporadically mid-session 'break time'
-- **DiscordWrapper** new features
-  - added **Proxy** class integration
-    - native proxy support (**HTTPS only**)
-  - session reconnections
-- **Menu** new features
-  - **BaseMenu**
-    - support for custom keybinds ('*./app/keybinds.json*') by **Keybinder** class
-    - CPU and Memory consumption reduced - better logic and structure overall (removed redundant calculations and  function calls, simplification, +)
-    - asynchronous notifications 'server' (threaded) → notifications are now queued and have priority and display time
-    - 'Config Status' panel split in 'App info' and 'Config Status' (with better choices of information to be displayed)
-    - **Popup** widget → extra information (like quests, exotic fishes, current inventory, charms and buffs) can be viewed in a popup format (see example) 
-  - **MainMenu(BaseMenu)** - "normal" mode
-    - design changes ([see comparison](https://imgur.com/a/tQSEXG3))
-    - screen strings are now resized dynamically to fit the terminal size
-    - added the Leaderboards panel
-    - added more profile information to the Inventory panel
-    - better exceptions handling 
-  - **CompactMenu(BaseMenu)** - compact mode
-    - minor design changes ([see comparison](https://imgur.com/a/tsIcg5O))
-    - better exceptions handling 
-- **ConfigManager** new features
-  - argument support for loading specific configs  (e.g. ```python autofishbot.py some_config_name```) (adaptation of @notvirtio 's solution #51)
-  - support for the creation of new (alt) configs using arguments (```python autofishbot.py --create```)
-  - new parameters:
-    - Network: ```proxy_ip```, ```proxy_port```, ```proxy_auth_user```, ```proxy_auth_password```, ```user_agent```
-    - Automation:
-      - added ```auto_sell```, ```auto_buy_baits```, ```auto_update_inventory```, ```auto_daily```
-      - splitted ```auto_buff``` in ```more_fish``` and ```more_treasures```
-      - renamed ```buff_length``` to ```boosts_length```
-    - Menu: ```refresh_rate```
-    - Cosmetic: ```pet```, ```bait```, ```biome``` (**not yet implemented**)
-- **Profile** new features
-  - support to charms inventory (*/charms*) + **Charms** datatype class
-  - support to user leaderboards (*/pos*) + **Leaderboard** datatype class
-  - support to buffs (multipliers list) (*/buffs*) + **Buffs** datatype class
-  - support to quests list (*/quests*) + **QuestList** and **Quest** datatype class
-#### **Changed**
-- refactored **DiscordWrapper** class
-  - discord's API (v9 → v10)
-  - *connect* function's structure
-  - heartbeat routine (adjusting to documentation requirements)
-  - *receive_event* function (better error management and pre deserialization)
-  - application commands and guild ID are now loaded on start-up
-  - *request* function (discord's HTTP API requests):
-    - simplification and better data structure
-    - better handling of exceptions (and proper returns)
-    - better error management to failure requests
-    - proper handling of discord's rate limits (429 error) (improvement of @gabeaventh 's solution #36)
-- refactored **Captcha** class
-  - compartmentalization
-  - multi-threading solving (asynchronous ocr-engine requests) → each engine request is made simultaneously, so captcha solving time is significantly faster.
-  - captcha detection function (added conditional safeguards)
-  - status flags (ensuring transparency of actions for external classes)
-- *message_dispatcher* function converted to **Dispatcher** class
-  - improvements in conditional gates to send commands (safer method)
-  - "**pause**" property, to globally pause the dispatcher (instead of a standalone class)
-  - improvements in sending captcha-related commands 
-  - improvements in cooldown calculations (to consider for network ping between requests oscillations/processing time, in order to preserve the Gaussian approach of value generation)
-- *message_receiver* function converted to **Receiver** class
-  - better event checking, parsing and validation
-  - simplification (removed unnecessary event validation, improvements in code structure, +)
-  - improvements in messages categorization
-  - untitled (and unhandled) messages are now properly sanitized and displayed on notifications
-  - better logic to detect captchas in raw events
-  - incorrect captcha code messages are now treated
-  - added of more breakpoints conditionals (in case of abnormal behavior)
-- refactored **Profile** class
-  - compartmentalization
-  - attribute fields (instead of a global fixed list)
-  - lists (displayed on menu) are now constructed individually per attribute (datatype classes) using the *list* property
-  - *update* function 
-  - gold, diamond, emerald and lava fishes are now grouped to **ExoticFish** class
-- refactored **CooldownManager** class
-  - simplification
-  - analysis functions removed
-- refactored **Message** class
-  - better message parsing and fields categorization
-  - untitled and contentless message are now handled
-- refactored **ConfigManager** class
-  - better loading/saving logic of config files
-  - compartmentalization of config parameters (system, captcha, network, automation, menu and cosmetic)
-  - better value parsing and validation
-- refactored **Debugger** class
-  - simplification
-  - outputs errors and exceptions to 'debug.log' file instead of displaying them on terminal
-- **PauseControl** class removed (integrated in **Dispatcher** class)
--  **MenuManager** class removed (split in **BaseMenu**, **MainMenu(BaseMenu)**, **CompactMenu(BaseMenu)** classes)
-- *autoBuff* function removed (integrated in **Scheduler** class)
-#### **Fixed**
-- fixed a bug in which the *sanitize* function in Message class couldn't parse some characters
-- fixed a bug in which  required fields weren't validated in ConfigManager (#48)
-- fixed a bug in which captcha.regen counter were redefined after solution failure
-- fixed a bug in which the bait name overlaps the border in compact mode - inventory (and related information) can be viewed separately on a popup using their respective keybinds (#50)
-- fixed a bug in which the curses kept blinking on screen's last update position
-- 
-...
+## License
 
-[FULL CHANGELOG HERE](assets/changelog.md)
-
-
-## Contributing
-- Pull requests are welcome. For major changes, open an issue first to discuss what you would like to change.
-- If you notice any errors, bugs or strange behavior **[PLEASE OPEN AN ISSUE](https://github.com/thejoabo/virtualfisher-bot/issues/new)** containing a screenshot or describing the problem.
-- [**Suggestions**](https://github.com/thejoabo/virtualfisher-bot/discussions/new) and [**Pull requests**](https://github.com/thejoabo/virtualfisher-bot/pulls) are welcome.
-
+Released under the [MIT License](LICENSE). Original codebase copyright (c) 2021 Joabo.

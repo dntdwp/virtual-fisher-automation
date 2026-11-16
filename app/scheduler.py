@@ -159,12 +159,12 @@ class Scheduler:
         self.current_break_interval = uniform(cd_min, cd_max)
 
     def check_task(self, cmd: CommandType, manual: bool) -> bool:
+        if self.captcha.detected or self.dsp.paused:
+            return False
         cond1 = cmd.last_usage == 0
         cond2 = (time() - cmd.last_usage) >= cmd.default_cd
         cond3 = manual == True
-        cond4 = self.captcha.detected == False
-        cond5 = self.dsp.paused == False
-        if cond1 or cond2 or cond3 and cond4 and cond5:
+        if cond1 or cond2 or cond3:
             return True
         return False
         
@@ -214,8 +214,8 @@ class Scheduler:
             self.break_check()
             self.status = SchStatus.READY
             
-            #Waits while paused
-            while self.dsp.paused:
+            #Waits while paused or while captcha is detected
+            while self.dsp.paused or self.captcha.detected:
                 sleep(1)
             
             for index, task in enumerate(self.queue):
